@@ -91,6 +91,22 @@ int main(void)
     CHECK(n == 8 && buf[0] == 0x09 && buf[1] == 0x90 && buf[2] == 62 && buf[3] == 80
           && buf[4] == 0x08 && buf[5] == 0x80 && buf[6] == 62, "note on and off from the peripheral (%d)", n);
 
+    BLE_MIDI_HOST_set_rx_latency(20000);
+    static const uint8_t first[] = { 0x80, 0x80, 0xF8 };
+    static const uint8_t later[] = { 0x80, 0x80 | 10, 0xF8, 0x80 | 30, 0xF8 };
+    on_queue(^{ BLE_MIDI_HOST_darwin_notified(0, first, (int32_t)sizeof(first)); });
+    usleep(40000);
+    on_queue(^{ BLE_MIDI_HOST_darwin_notified(0, later, (int32_t)sizeof(later)); });
+    usleep(30000);
+    const midi_transport_t *t = MIDI_transport_get(BLE_MIDI_HOST_dev_bit(0));
+    int64_t sent[4];
+    n = t->ops->read_sent(t->ctx, buf, sent, sizeof(buf));
+    CHECK(n == 12 && buf[1] == 0xF8 && buf[5] == 0xF8 && buf[9] == 0xF8
+          && sent[1] - sent[0] == 10000 && sent[2] - sent[1] == 20000,
+          "clocks of one connection event keep the times they were sent (%d, %lld, %lld)",
+          n, (long long)(sent[1] - sent[0]), (long long)(sent[2] - sent[1]));
+    BLE_MIDI_HOST_set_rx_latency(0);
+
     CHECK(BLE_MIDI_HOST_dev_send_packet(0, 0, 0xB, 0xB0, 7, 100) == 0, "control change queued");
     usleep(20000);
     CHECK(writes == 1 && written_len == 5 && written[2] == 0xB0 && written[3] == 7 && written[4] == 100,

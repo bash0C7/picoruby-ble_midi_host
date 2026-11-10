@@ -168,7 +168,8 @@ static void rx_push(void *arg, const uint8_t pkt[4], uint16_t ts)
 {
     slot_t *s = (slot_t *)arg;
     int64_t at = ble_midi_sync_release(&s->sync, ts, s->rx_now, s->rx_budget);
-    if (!midi_timed_ring_push(s->rx, pkt, at)) {
+    int64_t sent = s->rx_budget > 0 ? ble_midi_sync_sent(&s->sync) : at;
+    if (!midi_timed_ring_push_sent(s->rx, pkt, at, sent)) {
         s->stats.rx_dropped++;
         return;
     }
@@ -451,6 +452,12 @@ static int t_read(void *ctx, uint8_t *buf, size_t maxlen)
 }
 static int t_avail(void *ctx) { return BLE_MIDI_HOST_dev_bytes_available((int)(intptr_t)ctx); }
 static bool t_connected(void *ctx) { return BLE_MIDI_HOST_dev_connected((int)(intptr_t)ctx); }
+static int t_read_sent(void *ctx, uint8_t *buf, int64_t *sent_us, size_t maxlen)
+{
+    slot_t *s = slot_at((int)(intptr_t)ctx);
+    if (s == NULL || s->rx == NULL) return 0;
+    return midi_timed_ring_read_sent(s->rx, buf, sent_us, maxlen);
+}
 
 static const midi_transport_ops_t s_ops = {
     .send_packet     = t_send,
@@ -458,6 +465,7 @@ static const midi_transport_ops_t s_ops = {
     .bytes_available = t_avail,
     .is_connected    = t_connected,
     .transport_id    = MIDI_TRANSPORT_ID_BLE,
+    .read_sent       = t_read_sent,
 };
 
 static void register_slot(int i)
