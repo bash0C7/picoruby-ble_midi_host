@@ -125,6 +125,35 @@ int main(void)
     CHECK(strcmp(text, "A1:B2:C3:D4:E5:F6") == 0 && BLE_MIDI_HOST_parse_addr(text, parsed) == 0
           && memcmp(parsed, phone, 6) == 0, "address text");
 
+    static const uint8_t keys[6] = { 1, 1, 1, 1, 1, 1 };
+    static const uint8_t pads[6] = { 2, 2, 2, 2, 2, 2 };
+    on_queue(^{ BLE_MIDI_HOST_darwin_powered(false); });
+    int before = connects;
+    CHECK(BLE_MIDI_HOST_connect(keys, 0) == 1 && BLE_MIDI_HOST_connect(pads, 0) == 0, "both wait in their slots");
+    CHECK(connects == before, "nothing connects without power");
+    on_queue(^{ BLE_MIDI_HOST_darwin_powered(true); });
+    CHECK(connects == before + 1, "one connect at a time once powered");
+    on_queue(^{ BLE_MIDI_HOST_darwin_linked(0); });
+    CHECK(connects == before + 2 && BLE_MIDI_HOST_dev_status(1) == BLE_MIDI_HOST_SLOT_CONNECTING,
+          "the waiting slot connects after the first links");
+    on_queue(^{ BLE_MIDI_HOST_darwin_linked(1); });
+    on_queue(^{ BLE_MIDI_HOST_darwin_subscribing(1); });
+    on_queue(^{ BLE_MIDI_HOST_darwin_subscribed(1, 20); });
+    on_queue(^{ BLE_MIDI_HOST_darwin_failed(1, 0); });
+    CHECK(BLE_MIDI_HOST_scan_start(200) == 0, "user scan");
+    drain();
+    int during = connects;
+    on_queue(^{ BLE_MIDI_HOST_darwin_discovered(keys, "Keys", -40); });
+    CHECK(connects == during && BLE_MIDI_HOST_dev_status(1) == BLE_MIDI_HOST_SLOT_FREE,
+          "a user scan only records what it finds");
+    CHECK(BLE_MIDI_HOST_scan_results(peers, 4) == 1 && peers[0].known, "found and known");
+    on_queue(^{ BLE_MIDI_HOST_darwin_powered(false); });
+    CHECK(BLE_MIDI_HOST_scan_start(100) == 0, "scan without power");
+    usleep(200000);
+    drain();
+    CHECK(!BLE_MIDI_HOST_scanning(), "a scan without power still ends after its time");
+    on_queue(^{ BLE_MIDI_HOST_darwin_powered(true); });
+
     CHECK(BLE_MIDI_HOST_enable(false) == 0 && !BLE_MIDI_HOST_is_ready(), "not ready at once when disabled");
     drain();
     CHECK(powers_off == 1, "power off on the queue");

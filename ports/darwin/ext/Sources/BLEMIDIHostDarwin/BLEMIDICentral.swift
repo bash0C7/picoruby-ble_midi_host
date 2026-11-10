@@ -45,9 +45,6 @@ final class BLEMIDICentral: NSObject, CBCentralManagerDelegate, CBPeripheralDele
   func power(_ on: Bool) {
     guard on else {
       manager?.stopScan()
-      for peripheral in slots.values { manager?.cancelPeripheralConnection(peripheral) }
-      slots.removeAll()
-      characteristics.removeAll()
       return
     }
     guard let manager else {
@@ -60,7 +57,8 @@ final class BLEMIDICentral: NSObject, CBCentralManagerDelegate, CBPeripheralDele
   func scan(_ on: Bool) {
     guard let manager, manager.state == .poweredOn else { return }
     if on {
-      manager.scanForPeripherals(withServices: [Self.serviceID], options: nil)
+      manager.scanForPeripherals(withServices: [Self.serviceID],
+                                 options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
     } else {
       manager.stopScan()
     }
@@ -95,7 +93,7 @@ final class BLEMIDICentral: NSObject, CBCentralManagerDelegate, CBPeripheralDele
   func remember(key: UInt64, name: String) {
     if let index = known.firstIndex(where: { $0.key == key }) {
       known[index].name = name
-    } else if let identifier = seen[key]?.identifier ?? slots.values.first(where: { Self.key(Self.address($0.identifier)) == key })?.identifier {
+    } else if let identifier = seen[key]?.identifier {
       known.append(Known(key: key, identifier: identifier, name: name))
     }
     save()
@@ -153,17 +151,18 @@ final class BLEMIDICentral: NSObject, CBCentralManagerDelegate, CBPeripheralDele
   }
 
   func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-    guard let slot = slot(of: peripheral) else { return }
-    slots[slot] = nil
-    characteristics[slot] = nil
-    BLE_MIDI_HOST_darwin_failed(slot, Self.code(error))
+    released(peripheral, code: Self.code(error))
   }
 
   func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+    released(peripheral, code: error == nil ? 0 : Self.code(error))
+  }
+
+  private func released(_ peripheral: CBPeripheral, code: Int32) {
     guard let slot = slot(of: peripheral) else { return }
     slots[slot] = nil
     characteristics[slot] = nil
-    BLE_MIDI_HOST_darwin_failed(slot, error == nil ? 0 : Self.code(error))
+    BLE_MIDI_HOST_darwin_failed(slot, code)
   }
 
   func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {

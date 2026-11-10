@@ -82,7 +82,6 @@ static volatile bool s_flush_scheduled;
 static volatile bool s_scanning;
 static volatile bool s_scan_is_user;
 static volatile bool s_scan_pending;
-static volatile uint32_t s_scan_ms;
 static uint32_t s_scan_generation;
 static ble_midi_peer_t *s_results;
 static volatile int s_result_count;
@@ -259,49 +258,32 @@ static void slot_link_down(slot_t *s)
     if (s->rx) midi_timed_ring_clear(s->rx);
 }
 
+static void connect_next(void);
+
 static void scan_finish(void)
 {
-    if (!s_scanning) return;
-    bmh_swift_scan(false);
+    if (s_scanning && !s_scan_pending) bmh_swift_scan(false);
     s_scanning = false;
     s_scan_is_user = false;
+    s_scan_pending = false;
 }
 
 static void scan_begin(bool user, uint32_t ms)
 {
-    if (!s_powered) {
-        if (user) s_scan_pending = true;
-        return;
-    }
-    s_scan_pending = false;
+    uint32_t generation = ++s_scan_generation;
     s_scanning = true;
     s_scan_is_user = user;
-    uint32_t generation = ++s_scan_generation;
-    bmh_swift_scan(true);
+    s_scan_pending = !s_powered;
+    if (s_powered) bmh_swift_scan(true);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)ms * 1000000), s_q, ^{
         if (generation == s_scan_generation) scan_finish();
     });
 }
 
-static void connect_on_queue(int slot)
+static void connect_done(int slot)
 {
-    slot_t *s = &s_slots[slot];
-    if (s->status != BLE_MIDI_HOST_SLOT_CONNECTING || !s_powered) return;
-    if (!bmh_swift_connect(slot, s->addr)) {
-        s->stats.last_error = -1;
-        slot_link_down(s);
-        if (s_connecting == slot) s_connecting = -1;
-        return;
-    }
-    s_connecting = slot;
-    uint32_t attempt = ++s->connect_attempt;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)CONNECT_TIMEOUT_MS * 1000000), s_q, ^{
-        if (attempt != s->connect_attempt || s->status != BLE_MIDI_HOST_SLOT_CONNECTING) return;
-        bmh_swift_cancel(slot);
-        s->stats.last_error = -2;
-        slot_link_down(s);
-        if (s_connecting == slot) s_connecting = -1;
-    });
+    if (s_connecting == slot) s_connecting = -1;
+    connect_next();
 }
 
 static void service_tick(void)
@@ -353,45 +335,55 @@ void BLE_MIDI_HOST_darwin_powered(bool on)
     if (!on) {
         s_scanning = false;
         s_scan_is_user = false;
+        s_scan_pending = false;
         for (int i = 0; i < BLE_MIDI_HOST_MAX_DEVICES; i++) {
             if (s_slots[i].status != BLE_MIDI_HOST_SLOT_FREE) slot_link_down(&s_slots[i]);
         }
         s_connecting = -1;
         return;
     }
-    if (s_scan_pending) scan_begin(true, s_scan_ms);
-    for (int i = 0; i < BLE_MIDI_HOST_MAX_DEVICES; i++) {
-        if (s_slots[i].status == BLE_MIDI_HOST_SLOT_CONNECTING && s_connecting < 0) connect_on_queue(i);
+    if (s_scan_pending) {
+        s_scan_pending = false;
+        bmh_swift_scan(true);
     }
+    connect_next();
 }
+
+static void results_add(const uint8_t addr[6], const char *name, int32_t rssi)
+{
+    pthread_mutex_lock(&s_results_mux);
+    int idx = -1;
+    for (int i = 0; i < s_result_count; i++) {
+        if (memcmp(s_results[i].addr, addr, 6) == 0) { idx = i; break; }
+    }
+    if (idx < 0 && s_result_count < BLE_MIDI_HOST_MAX_RESULTS) {
+        idx = s_result_count++;
+        memset(&s_results[idx], 0, sizeof(s_results[idx]));
+        memcpy(s_results[idx].addr, addr, 6);
+    }
+    if (idx >= 0) {
+        s_results[idx].rssi = (int8_t)rssi;
+        if (name && name[0]) {
+            strncpy(s_results[idx].name, name, sizeof(s_results[idx].name) - 1);
+            s_results[idx].name[sizeof(s_results[idx].name) - 1] = '\0';
+        }
+    }
+    pthread_mutex_unlock(&s_results_mux);
+}
+
+static int request_connect(const uint8_t addr[6]);
 
 void BLE_MIDI_HOST_darwin_discovered(const uint8_t addr[6], const char *name, int32_t rssi)
 {
     if (s_scan_is_user) {
-        pthread_mutex_lock(&s_results_mux);
-        int idx = -1;
-        for (int i = 0; i < s_result_count; i++) {
-            if (memcmp(s_results[i].addr, addr, 6) == 0) { idx = i; break; }
-        }
-        if (idx < 0 && s_result_count < BLE_MIDI_HOST_MAX_RESULTS) {
-            idx = s_result_count++;
-            memset(&s_results[idx], 0, sizeof(s_results[idx]));
-            memcpy(s_results[idx].addr, addr, 6);
-        }
-        if (idx >= 0) {
-            s_results[idx].rssi = (int8_t)rssi;
-            if (name && name[0]) {
-                strncpy(s_results[idx].name, name, sizeof(s_results[idx].name) - 1);
-                s_results[idx].name[sizeof(s_results[idx].name) - 1] = '\0';
-            }
-        }
-        pthread_mutex_unlock(&s_results_mux);
+        results_add(addr, name, rssi);
+        return;
     }
-    if (!s_auto || s_connecting >= 0 || in_slot(addr) || parked(addr)) return;
+    if (!s_auto || in_slot(addr) || parked(addr)) return;
     pthread_mutex_lock(&s_known_mux);
     bool known = known_find(addr) >= 0;
     pthread_mutex_unlock(&s_known_mux);
-    if (known) BLE_MIDI_HOST_connect(addr, 0);
+    if (known) request_connect(addr);
 }
 
 void BLE_MIDI_HOST_darwin_linked(int32_t slot)
@@ -400,7 +392,7 @@ void BLE_MIDI_HOST_darwin_linked(int32_t slot)
     if (s == NULL || s->status != BLE_MIDI_HOST_SLOT_CONNECTING) return;
     s->status = BLE_MIDI_HOST_SLOT_DISCOVERING;
     s->stats.connections++;
-    if (s_connecting == slot) s_connecting = -1;
+    connect_done(slot);
 }
 
 void BLE_MIDI_HOST_darwin_subscribing(int32_t slot)
@@ -426,8 +418,8 @@ void BLE_MIDI_HOST_darwin_failed(int32_t slot, int32_t error)
     if (s == NULL || s->status == BLE_MIDI_HOST_SLOT_FREE) return;
     if (error != 0) s->stats.last_error = error;
     slot_link_down(s);
-    if (s_connecting == slot) s_connecting = -1;
     if (!s->parked) s_next_reconnect_us = 0;
+    connect_done(slot);
 }
 
 void BLE_MIDI_HOST_darwin_notified(int32_t slot, const uint8_t *data, int32_t length)
@@ -551,7 +543,6 @@ int BLE_MIDI_HOST_scan_start(uint32_t duration_ms)
     s_result_count = 0;
     pthread_mutex_unlock(&s_results_mux);
     uint32_t ms = duration_ms ? duration_ms : 5000;
-    s_scan_ms = ms;
     s_scanning = true;
     s_scan_is_user = true;
     dispatch_async(s_q, ^{ scan_begin(true, ms); });
@@ -562,11 +553,8 @@ void BLE_MIDI_HOST_scan_stop(void)
 {
     if (s_q == NULL) return;
     dispatch_async(s_q, ^{
-        s_scan_pending = false;
         s_scan_generation++;
-        if (s_scanning && s_powered) bmh_swift_scan(false);
-        s_scanning = false;
-        s_scan_is_user = false;
+        scan_finish();
     });
 }
 
@@ -609,13 +597,23 @@ static void lookup_name(const uint8_t addr[6], char *out, size_t cap)
     if (out[0] == '\0') snprintf(out, cap, "BLE %02X%02X", addr[4], addr[5]);
 }
 
-int BLE_MIDI_HOST_connect(const uint8_t addr[6], uint8_t addr_type)
+static void connect_next(void)
 {
-    (void)addr_type;
-    if (BLE_MIDI_HOST_init() != 0 || addr == NULL) return -1;
-    if (!s_wanted) BLE_MIDI_HOST_enable(true);
-    if (s_connecting >= 0) return -1;
+    if (!s_powered || s_connecting >= 0) return;
+    for (int i = 0; i < BLE_MIDI_HOST_MAX_DEVICES && s_connecting < 0; i++) {
+        slot_t *s = &s_slots[i];
+        if (s->status != BLE_MIDI_HOST_SLOT_CONNECTING) continue;
+        if (bmh_swift_connect(i, s->addr)) {
+            s_connecting = i;
+        } else {
+            s->stats.last_error = -1;
+            slot_link_down(s);
+        }
+    }
+}
 
+static int request_connect(const uint8_t addr[6])
+{
     int pick = -1;
     for (int i = 0; i < BLE_MIDI_HOST_MAX_DEVICES; i++) {
         if (s_slots[i].used && memcmp(s_slots[i].addr, addr, 6) == 0) {
@@ -640,12 +638,26 @@ int BLE_MIDI_HOST_connect(const uint8_t addr[6], uint8_t addr_type)
     memset(&s->stats, 0, sizeof(s->stats));
     s->status = BLE_MIDI_HOST_SLOT_CONNECTING;
     register_slot(pick);
-    s_connecting = pick;
-    dispatch_async(s_q, ^{
-        if (s_connecting == pick) s_connecting = -1;
-        connect_on_queue(pick);
+    uint32_t attempt = ++s->connect_attempt;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)CONNECT_TIMEOUT_MS * 1000000), s_q, ^{
+        if (attempt != s->connect_attempt || s->status != BLE_MIDI_HOST_SLOT_CONNECTING) return;
+        bmh_swift_cancel(pick);
+        s->stats.last_error = -2;
+        slot_link_down(s);
+        connect_done(pick);
     });
+    connect_next();
     return pick;
+}
+
+int BLE_MIDI_HOST_connect(const uint8_t addr[6], uint8_t addr_type)
+{
+    (void)addr_type;
+    if (BLE_MIDI_HOST_init() != 0 || addr == NULL) return -1;
+    if (!s_wanted) BLE_MIDI_HOST_enable(true);
+    __block int slot = -1;
+    dispatch_sync(s_q, ^{ slot = request_connect(addr); });
+    return slot;
 }
 
 void BLE_MIDI_HOST_disconnect(int slot)
@@ -653,12 +665,11 @@ void BLE_MIDI_HOST_disconnect(int slot)
     slot_t *s = slot_at(slot);
     if (s == NULL) return;
     s->parked = true;
-    if (s->status == BLE_MIDI_HOST_SLOT_FREE) return;
     dispatch_async(s_q, ^{
         if (s->status == BLE_MIDI_HOST_SLOT_FREE) return;
         bmh_swift_cancel(slot);
         slot_link_down(s);
-        if (s_connecting == slot) s_connecting = -1;
+        connect_done(slot);
     });
 }
 
