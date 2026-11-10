@@ -1,0 +1,2 @@
+ports/darwin/ext/.build/
+ports/darwin/test/test_ble_midi_host_darwin

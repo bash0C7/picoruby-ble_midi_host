@@ -25,8 +25,16 @@ BLE_MIDI_HOST.rx_latency = 20             # ms (:auto by default, 0 = off)
   (`rx_latency`).
 - Works alongside picoruby-ble's `BLE` class: its scans and connects go
   first; ours (and reconnecting) wait until it is done.
-- ESP32 only, on NimBLE through picoruby-ble's shared NimBLE owner. The host
+- ESP32 on NimBLE through picoruby-ble's shared NimBLE owner. The host
   project compiles `ports/esp32` and defines `BLE_MIDI_HOST_ENABLED=1`.
+- macOS / iOS on CoreBluetooth (`CBCentralManager`): the build compiles
+  `ports/darwin` with picoruby-midi's Darwin port, and the app links the
+  Swift package `ports/darwin/ext` (`BLEMIDIHostDarwin`) and declares
+  `NSBluetoothAlwaysUsageDescription`. CoreBluetooth gives no Bluetooth
+  address, so `address` is the first 6 bytes of the peripheral's identifier;
+  remembered peripherals are kept in `UserDefaults`
+  (`picoruby.ble_midi_host.known`). `make -C ports/darwin/test` tests the C
+  side on macOS with picoruby-midi checked out next to this repository.
 - Build-time knobs (slots, intervals, reconnect timing):
   `include/ble_midi_host_config.h`.
 
