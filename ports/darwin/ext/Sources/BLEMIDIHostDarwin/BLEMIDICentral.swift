@@ -130,6 +130,7 @@ final class BLEMIDICentral: NSObject, CBCentralManagerDelegate, CBPeripheralDele
       slots.removeAll()
       characteristics.removeAll()
     }
+    BLE_MIDI_HOST_darwin_unavailable(central.state == .unauthorized || central.state == .unsupported)
     BLE_MIDI_HOST_darwin_powered(on)
   }
 

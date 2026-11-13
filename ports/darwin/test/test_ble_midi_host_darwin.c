@@ -53,6 +53,11 @@ int main(void)
     CHECK(BLE_MIDI_HOST_enable(true) == 0, "enable");
     drain();
     CHECK(powers_on == 1 && !BLE_MIDI_HOST_is_ready(), "power asked, not ready yet");
+    CHECK(BLE_MIDI_HOST_available(), "available until Bluetooth says otherwise");
+    on_queue(^{ BLE_MIDI_HOST_darwin_unavailable(true); BLE_MIDI_HOST_darwin_powered(false); });
+    CHECK(!BLE_MIDI_HOST_available() && !BLE_MIDI_HOST_is_ready(), "unavailable without the Bluetooth permission");
+    on_queue(^{ BLE_MIDI_HOST_darwin_unavailable(false); });
+    CHECK(BLE_MIDI_HOST_available(), "available again once permitted");
 
     CHECK(BLE_MIDI_HOST_scan_start(300) == 0, "scan");
     CHECK(BLE_MIDI_HOST_scanning(), "scanning before power");

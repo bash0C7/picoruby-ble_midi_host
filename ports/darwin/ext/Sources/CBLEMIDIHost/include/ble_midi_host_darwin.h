@@ -11,6 +11,7 @@ extern "C" {
 
 dispatch_queue_t BLE_MIDI_HOST_darwin_queue(void);
 void BLE_MIDI_HOST_darwin_known(const uint8_t addr[6], const char *name);
+void BLE_MIDI_HOST_darwin_unavailable(bool unavailable);
 void BLE_MIDI_HOST_darwin_powered(bool on);
 void BLE_MIDI_HOST_darwin_discovered(const uint8_t addr[6], const char *name, int32_t rssi);
 void BLE_MIDI_HOST_darwin_linked(int32_t slot);

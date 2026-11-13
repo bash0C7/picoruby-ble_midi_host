@@ -75,6 +75,7 @@ static dispatch_source_t s_service_timer;
 static volatile bool s_wanted;
 static volatile bool s_held;
 static volatile bool s_powered;
+static volatile bool s_unavailable;
 static volatile bool s_auto = true;
 static volatile int32_t s_rx_latency = BLE_MIDI_HOST_RX_LATENCY_US;
 static volatile bool s_flush_scheduled;
@@ -330,6 +331,11 @@ void BLE_MIDI_HOST_darwin_known(const uint8_t addr[6], const char *name)
     known_put(addr, name);
 }
 
+void BLE_MIDI_HOST_darwin_unavailable(bool unavailable)
+{
+    s_unavailable = unavailable;
+}
+
 void BLE_MIDI_HOST_darwin_powered(bool on)
 {
     s_powered = on && s_held;
@@ -522,7 +528,7 @@ fail:
     return -1;
 }
 
-bool BLE_MIDI_HOST_available(void) { return true; }
+bool BLE_MIDI_HOST_available(void) { return !s_unavailable; }
 
 int BLE_MIDI_HOST_enable(bool on)
 {
